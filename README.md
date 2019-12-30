@@ -17,6 +17,7 @@ The BNO055, luckily, can easily change its I2C address to 0x29 so it doesn't col
        2.2 kOhm          1 kOhm
 5V -----/\/\/\-----+-----/\/\/\-----|| Ground
                    |
+                   |
                    3V
 
 The code sets the HC-06 name to WingThing but you can set it to whatever you want if you want to get creative.  The Stratofier app doesn't actually care what the device is called since it's looking for the correct underlying serial stream.
