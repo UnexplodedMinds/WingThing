@@ -1,5 +1,5 @@
 /*
- * WingThing (c) 2019 Allen K. Lair, Sky Fun
+  WingThing (c) 2019 Allen K. Lair, Sky Fun
  
   MPL3115A2 Altimiter I2C address is 0x60.
   BNO055 9DOF Orientation and Magnetometer sensor is 0x29 with 3V applied to ADR pin, otherwise 0x28.
@@ -7,53 +7,53 @@
   The 4525DO Pitot-Static sensor address is 0x28 - it is software configurable but a pain to change.
  */
 
+#include <SPI.h>
 #include <Wire.h>
-// #include "SoftwareSerial.h"
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
 #include <Adafruit_MPL3115A2.h>
+#include <utility/imumaths.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
 
-// SoftwareSerial Bluetooth( 10, 9 ); // RX, TX
-char           btBuff[7];
-int            btAvail = 0, btPos = 0;
+Adafruit_BNO055 bno = Adafruit_BNO055( 55, 0x29 );
 
-Adafruit_BNO055 bno = Adafruit_BNO055( 55, 0x28 );
-sensors_event_t orientationData, magData; // Note there is more data available from the BNO055 sensor but this is all we are interested in.
+sensors_event_t magData; //, orientationData; // Note there is more data available from the BNO055 sensor but this is all we are interested in.
 int8_t          boardTemp;
-double          oX = 0.0, oY = 0.0, oZ = 0.0, mX = 0.0, mY = 0.0, mZ = 0.0;
+double          mX = 0.0, mY = 0.0, mZ = 0.0; //, oX = 0.0, oY = 0.0, oZ = 0.0;
 double          head = 0.0, airspeed = 0.0;
 
 Adafruit_MPL3115A2 baro = Adafruit_MPL3115A2();
-float                     pressure = 0.0f, temp = 0.0f, altitude = 0.0f;
+float              pressure = 0.0f, temp = 0.0f, altitude = 0.0f;
 
-char     buff[4];
+uint8_t  btString[32];
+char     pitotBuff[4];
+char     dispString[64];
 char     b1, b2, t1, t2;
 uint16_t usBridge, usTemp;
 int      iBuffPos;
 float    pitotTemp = 0.0f;
 float    pitotPressure = 0.0f;
 float    seaPress = 101320.76;
+int      iCheck;
+bool     bHeart = true;
 
-int iCheck;
+
+TwoWire          oled_i2c( 0 );
+Adafruit_SSD1306 disp( 128, 64, &oled_i2c, -1 );
+WiFiUDP          udp;
+int              iFromStratofier = 0;
+
 
 void setup()
 {
-  // Serial is only required for debugging for this project.
-  Serial.begin( 9600 );
+  printf( "Starting\n" );
 
-  delay( 1000 );
-
-  Serial.println( "Starting" );
-
-  return;
-  
-  // Set the baud rate between the HC-06 and Arduino - higher baud rates will work but 9600 is fast enough and less prone to errors
-//  Bluetooth.begin( 9600 );
-  delay( 100 );
-  // Set the Bluetooth device name on the HC-06 module
-//  Bluetooth.print( "AT+NAMEWingThing" );
+   // Built-in LED
+  pinMode( LED_BUILTIN, OUTPUT );
 
   // Initialize the BNO055 sensor. Flash the built-in LED very fast forever if it was not successful.
   if( !bno.begin() )
@@ -65,55 +65,84 @@ void setup()
   bno.setAxisRemap( Adafruit_BNO055::REMAP_CONFIG_P2 );
   bno.setAxisSign( Adafruit_BNO055::REMAP_SIGN_P2 );
 
-  delay( 100 );
+  pinMode( 16, OUTPUT );
+  digitalWrite( 16, LOW );    // set GPIO16 low to reset OLED
+  delay( 50 );
+  digitalWrite( 16, HIGH );   // while OLED is running, must set GPIO16 to high
+
+  oled_i2c.begin( 4, 15 );
+  disp.begin( SSD1306_SWITCHCAPVCC, 0x3C, true, true );
+  disp.clearDisplay();
+  disp.setTextSize( 1 );
+
+  disp.setCursor( 0, 0 );
+  disp.setTextColor( SSD1306_WHITE, SSD1306_BLACK );
+  disp.print( "CONNECTING..." );
+  disp.display();
+  WiFi.begin( "stratux" );
+  while( WiFi.status() != WL_CONNECTED )
+    delay( 500 );
+  disp.setCursor( 0, 24 );
+  disp.print( "Stratux Connected" );
+  disp.setCursor( 0, 48 );
+  disp.print( "IP:" );
+  disp.setCursor( 25, 48 );
+  disp.print( WiFi.localIP() );
+  disp.display();
+  udp.begin( 45678 );
+  delay( 2000 );
+
+  disp.clearDisplay();
+  disp.setCursor( 0, 0 );
+  disp.setTextColor( SSD1306_BLACK, SSD1306_WHITE );
+  disp.print( "SKY FUN - WINGTHING" );
+  disp.setTextColor( SSD1306_WHITE, SSD1306_BLACK );
+  disp.setCursor( 0, 12 );
+  disp.print( "IAS:" );
+  disp.setCursor( 0, 24 );
+  disp.print( "ALT:" );
+  disp.setCursor( 0, 36 );
+  disp.print( "HED:" );
+  disp.setCursor( 0, 50 );
+  disp.print( "TMP/BAR:" );
 }
- 
+
+
 void loop()
 {
-  // This is required for every sampling of the MPL3115A2.
   if( !baro.begin() )
     flashLEDforever( 2000 );
-
-  String btString;
 
   // Get the barometric pressure set from the app, if sent.
   // Stratofier will send "NN.NN" with no qualifiers in exactly that format (without quotes) when it's set in the app.
   // The MPL3115A2 will use this to internally calibrate the altitude to the correct pressure altitude.
-/*
-  btAvail = Bluetooth.available();
-  btPos = 0;
-  while( btAvail > 0 )
+
+  iFromStratofier = udp.parsePacket();
+  if( iFromStratofier > 0 )
   {
-    btBuff[btPos] = Bluetooth.read();
-    btPos++;
-    if( btPos > 5 )
-      break;
+    udp.read( dispString, iFromStratofier );
+    seaPress = atof( dispString ) * 3386.39;
   }
-  if( btPos == 5 )
-  {
-    btBuff[5] = '\0';
-    String newBaro( btBuff );
-    seaPress = newBaro.toFloat() * 3386.39;
-  }
-*/
+
   // There is other data available from this sensor but we are only interested in orientation and magnetic heading
-  bno.getEvent( &orientationData, Adafruit_BNO055::VECTOR_EULER );
+  // bno.getEvent( &orientationData, Adafruit_BNO055::VECTOR_EULER );
   bno.getEvent( &magData, Adafruit_BNO055::VECTOR_MAGNETOMETER );
 
   // Assign the data to their respective structs
-  populate( &orientationData );
+  // populate( &orientationData );
   populate( &magData );
 
   // Calculate the magnetic heading; 30 degrees seems to be a constant offset - may need adjustment or even a calibration table.  It's very sensitive.
-  head = (atan2( mY, mX ) * 57.29578) - 30.0;
+  head = (atan2( mY, mX ) * 57.29578);
   if( head < 0.0 )
     head = 360.0 + head;
 
   // Get all the MPL3115A2 data
   baro.setSeaPressure( seaPress );          // seaPress is in Pascals, converted from inches Hg in the set routine above
   pressure = baro.getPressure() / 3377.0;   // Pressure in inches Hg
-  altitude = baro.getAltitude() * 3.28084;  // Altitude is in inches Hg from standard (29.92 in Hg).  Calculation to feet is done in Stratofier app.
+  altitude = baro.getAltitude() * 3.28084;  // Altitude in feet
   temp = baro.getTemperature();             // This is the temperature sent to Stratofier. pitotTemp below is used internally to calibrate the airspeed sensor.
+                                            // Also note that 20 degrees is a fixed offset.  It may not be necessary when mounted outside; inside the sensor seems to artificially gradually climb.
 
   // Get the 4525DO sensor data
   // Note that thers is no Arduino library available for his sensor although there may be a compatible one for a sensor that uses the same hardware.
@@ -131,44 +160,47 @@ void loop()
   // No backward flying :)
   if( airspeed < 0.0f )
     airspeed = 0.0f;
-
-  // Send the data
-  btString = String( airspeed, 2 );
-  btString.concat( "," );
-  btString.concat( String( altitude, 2 ) );
-  btString.concat( "," );
-  btString.concat( String( head, 2 ) );
-  btString.concat( "," );
-
-  // Barometric pressure placeholder - we could use the uncalibrated altimiter reading here or
-  // a reliable pressure sensor.  Good ones are actually pretty expensive.  For now it's just a placeholder
-  btString.concat( "-1," );
-
-  btString.concat( String( oX, 4 ) );
-  btString.concat( "," );
-  btString.concat( String( oY, 4 ) );
-  btString.concat( "," );
-  btString.concat( String( oZ, 4 ) );
-  btString.concat( "," );
-  btString.concat( String( temp, 2 ) );
-  btString.concat( "," );
+  // No flying in the ground (some places are below sea level but you'd never fly there)
+  if( altitude < 0.0f )
+    altitude = 0.0f;
 
   // Simple checksum
-  iCheck = static_cast<int>( (airspeed + altitude + head + oX + oY + oZ + temp) / 7.0 );
+  iCheck = static_cast<int>( (airspeed + altitude + head + temp) / 4.0 );
 
-  btString.concat( String( iCheck ) );
+  // Send the data over UDP
+  sprintf( dispString, "%.2f,%.2f,%.2f,-1,%.2f,%d;", airspeed, altitude, head, temp, iCheck );
+  // printf( "%s\n", dispString );
+  memcpy( btString, dispString, strlen( dispString ) );
+  udp.beginPacket( "192.168.10.255", 45678 );
+  udp.write( static_cast<uint8_t *>( btString ), strlen( dispString ) );
+  udp.endPacket();
   
-  btString.concat( ";" );
+  // Blink the built-in LED as a heartbeat and 
+  if( bHeart )
+  {
+    digitalWrite( LED_BUILTIN, HIGH );
+    disp.begin( SSD1306_SWITCHCAPVCC, 0x3C, true, true );
+    sprintf( dispString, "%.2f", airspeed );
+    disp.setCursor( 50, 12 );
+    disp.print( dispString );
+    sprintf( dispString, "%.2f", altitude );
+    disp.setCursor( 50, 24 );
+    disp.print( dispString );
+    sprintf( dispString, "%.2f", head );
+    disp.setCursor( 50, 36 );
+    disp.print( dispString );
+    sprintf( dispString, "%.2f / %.2f", temp, seaPress / 3386.39 );
+    disp.setCursor( 50, 50 );
+    disp.print( dispString );
+    disp.display();
+  }
+  else
+    digitalWrite( LED_BUILTIN, LOW );
 
-  // Send the data over Bluetooth
-//  Bluetooth.print( btString );
-
-  Serial.println( btString );
-
-  delay( 100 );
+  bHeart = (!bHeart);
 }
 
-// Used for simple debugging without a terminal
+// Used for simple debugging without a terminal or display
 void flashLEDforever( int iMS )
 {
   pinMode( LED_BUILTIN, OUTPUT );
@@ -184,13 +216,7 @@ void flashLEDforever( int iMS )
 // Fill in the data structs from the BNO055 sensor data
 void populate( sensors_event_t *se )
 {
-  if( se->type == SENSOR_TYPE_ORIENTATION )
-  {
-    oX = se->orientation.x;
-    oY = se->orientation.y;
-    oZ = se->orientation.z;
-  }
-  else if( se->type == SENSOR_TYPE_MAGNETIC_FIELD )
+  if( se->type == SENSOR_TYPE_MAGNETIC_FIELD )
   {
     mX = se->magnetic.x;
     mY = se->magnetic.y;
@@ -198,24 +224,25 @@ void populate( sensors_event_t *se )
   }
 }
 
+
 // Get the data from the 4525DO sensor (airspeed and temperature)
 // This function is used in place of what would otherwise be done by a library but there doesn't appear to be one for this sensor.
 void getPitotStatic()
 {
-  memset( buff, 0x00, sizeof( char ) * 4 );
+  memset( pitotBuff, 0x00, sizeof( char ) * 4 );
   Wire.requestFrom( 0x28, 4 );
   iBuffPos = 0;
   while( Wire.available() )
   {
-    buff[iBuffPos] = Wire.read();
+    pitotBuff[iBuffPos] = Wire.read();
     iBuffPos++;
   }
 
   // Bridge and Temp data in the 4-byte return
-  b1 = buff[0];
-  b2 = buff[1];
-  t1 = buff[2];
-  t2 = buff[3];
+  b1 = pitotBuff[0];
+  b2 = pitotBuff[1];
+  t1 = pitotBuff[2];
+  t2 = pitotBuff[3];
 
   b1 &= 0x3F;                                                     // Mask out the two high bits of the pressure
   t2 &= 0xE0;                                                     // Mask out the 5 low bits of the temperature
